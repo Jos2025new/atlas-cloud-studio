@@ -190,4 +190,97 @@ describe("atlas proxy", () => {
       params: { temperature: 0.7, maxTokens: 1024 },
     })).rejects.toMatchObject({ code: "UNAUTHORIZED", message: "Invalid API key" });
   });
+
+  it("reads Atlas msg errors and includes the provider request id", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ code: "INVALID_ARGUMENT", msg: "Unsupported size", request_id: "req_body" }), {
+        status: 400,
+        headers: { "X-Request-ID": "req_header" },
+      }),
+    ));
+
+    await expect(appRouter.createCaller(createContext()).atlas.generateImage({
+      apiKey: "apikey-test",
+      model: "bytedance/seedream-v5.0-pro/text-to-image",
+      prompt: "Hello",
+      params: seedreamParams,
+      referenceUrls: [],
+    })).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: "Unsupported size (request req_header)",
+    });
+  });
+
+  it("treats Atlas error envelopes as failures even when HTTP is 200", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ code: 401, msg: "Token invalid", request_id: "req_logical" }), { status: 200 }),
+    ));
+
+    await expect(appRouter.createCaller(createContext()).atlas.generateImage({
+      apiKey: "bad-key",
+      model: "bytedance/seedream-v5.0-pro/text-to-image",
+      prompt: "Hello",
+      params: seedreamParams,
+      referenceUrls: [],
+    })).rejects.toMatchObject({ code: "UNAUTHORIZED", message: "Token invalid (request req_logical)" });
+  });
+
+  it("validates a key and returns the available balance", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: { balance: "12.45", currency: "USD" },
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await appRouter.createCaller(createContext()).atlas.validateKey({ apiKey: "apikey-test" });
+
+    expect(result).toEqual({ valid: true, billingAccess: true, balance: 12.45, currency: "USD" });
+    const [url, request] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://api.atlascloud.ai/public/v1/balance");
+    expect((request.headers as Record<string, string>).Authorization).toBe("Bearer apikey-test");
+  });
+
+  it("quotes an image request without creating a prediction", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: { price: "0.052", origin_price: "0.065", discount: "80", estimated: false, estimated_tokens: 0 },
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await appRouter.createCaller(createContext()).atlas.calculate({
+      apiKey: "apikey-test",
+      kind: "image",
+      model: "bytedance/seedream-v5.0-pro/text-to-image",
+      prompt: "A glass greenhouse",
+      params: seedreamParams,
+      referenceUrls: [],
+    });
+
+    expect(result).toEqual({ price: 0.052, originPrice: 0.065, discount: 80, estimated: false, estimatedTokens: 0 });
+    const [url, request] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://api.atlascloud.ai/api/v1/model/calculate");
+    expect(JSON.parse(String(request.body))).toMatchObject({
+      model: "bytedance/seedream-v5.0-pro/text-to-image",
+      prompt: "A glass greenhouse",
+      size: "2048*1152",
+    });
+  });
+
+  it("returns an uncertain result when transport fails during a paid submission", async () => {
+    const networkError = new TypeError("fetch failed", { cause: { code: "ECONNRESET" } });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(networkError));
+
+    const result = await appRouter.createCaller(createContext()).atlas.generateImage({
+      apiKey: "apikey-test",
+      model: "bytedance/seedream-v5.0-pro/text-to-image",
+      prompt: "A glass greenhouse",
+      params: seedreamParams,
+      referenceUrls: [],
+    });
+
+    expect(result).toMatchObject({
+      accepted: false,
+      uncertain: true,
+      transportCode: "ECONNRESET",
+    });
+    expect(JSON.stringify(result)).not.toContain("apikey-test");
+  });
 });

@@ -36,7 +36,7 @@ describe("studioStore sessions", () => {
     saveStudioStore(store, storage);
     const restored = loadStudioStore(storage);
 
-    expect(restored.version).toBe(5);
+    expect(restored.version).toBe(6);
     expect(restored.sessions[0].references.map((reference) => reference.url)).toEqual([first.url, second.url]);
     expect(restored.sessions[0].finalFrame?.url).toBe(finalFrame.url);
   });
@@ -62,7 +62,7 @@ describe("studioStore sessions", () => {
       jobs: [],
     }));
     const restored = loadStudioStore(storage);
-    expect(restored.version).toBe(5);
+    expect(restored.version).toBe(6);
     expect(restored.sessions[0].references).toHaveLength(1);
     expect(restored.sessions[0].references[0].url).toBe(reference.url);
   });
@@ -146,5 +146,51 @@ describe("generation recovery", () => {
     expect(normalizeGenerationStatus("running")).toBe("processing");
     expect(normalizeGenerationStatus("succeeded")).toBe("completed");
     expect(normalizeGenerationStatus("cancelled")).toBe("failed");
+    expect(normalizeGenerationStatus("timeout")).toBe("timed_out");
+    expect(normalizeGenerationStatus("expired")).toBe("timed_out");
+  });
+
+  it("persists an attempt before Atlas returns a prediction id", () => {
+    const storage = new MemoryStorage();
+    let store = loadStudioStore(storage);
+    const job = createGenerationJob({
+      sessionId: store.activeSessionId,
+      kind: "image",
+      model: "bytedance/seedream-v5.0-pro/text-to-image",
+      prompt: "Keep this prompt",
+      params: {},
+      status: "submitting",
+      quote: { price: 0.052, estimated: false },
+    });
+    store = addGenerationJob(store, job);
+    store = updateGenerationJob(store, job.id, {
+      status: "submission_uncertain",
+      error: "Atlas did not confirm whether it accepted this request.",
+    });
+    saveStudioStore(store, storage);
+
+    const restored = loadStudioStore(storage);
+    expect(restored.jobs[0]).toMatchObject({
+      prompt: "Keep this prompt",
+      status: "submission_uncertain",
+      quote: { price: 0.052, estimated: false },
+    });
+    expect(restored.jobs[0].requestId).toBeUndefined();
+    expect(recoverableJobs(restored)).toHaveLength(0);
+  });
+
+  it("only recovers accepted jobs that have a prediction id", () => {
+    let store = loadStudioStore(new MemoryStorage());
+    const job = createGenerationJob({
+      sessionId: store.activeSessionId,
+      kind: "video",
+      model: "bytedance/seedance-2.0-fast/text-to-video",
+      prompt: "Move",
+      params: {},
+      status: "submitting",
+    });
+    store = addGenerationJob(store, job);
+    store = updateGenerationJob(store, job.id, { status: "pending", requestId: "pred_later", providerStatus: "queued" });
+    expect(recoverableJobs(store)).toHaveLength(1);
   });
 });

@@ -1,5 +1,6 @@
 import { ArrowUpRight, Image as ImageIcon, KeyRound, Layers3, MessageSquare, MoreHorizontal, Plus, Trash2, Video, X, Zap } from "lucide-react";
 import type { StudioMode, StudioSession } from "@/lib/studioStore";
+import { connectionCopy, type AtlasConnection } from "@/lib/atlasConnection";
 
 const items: Array<{ id: StudioMode; label: string; icon: typeof MessageSquare }> = [
   { id: "chat", label: "Chat", icon: MessageSquare },
@@ -20,7 +21,7 @@ function relativeTime(timestamp: string) {
 
 type Props = {
   open: boolean;
-  apiKey: string;
+  connection: AtlasConnection;
   mode: StudioMode;
   activeSessionId: string;
   sessions: StudioSession[];
@@ -35,6 +36,7 @@ type Props = {
 
 export default function StudioSidebar(props: Props) {
   const sessions = [...props.sessions].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const connection = connectionCopy[props.connection.status];
   return <>
     <aside className={`${props.open ? "translate-x-0" : "-translate-x-full lg:translate-x-0"} fixed inset-y-0 left-0 z-40 flex w-[272px] flex-col border-r border-white/[.08] bg-[#0c0d0f] px-4 py-5 transition-transform lg:static`}>
       <div className="flex items-center justify-between px-2">
@@ -54,7 +56,7 @@ export default function StudioSidebar(props: Props) {
         </div>)}</div>
       </div>
 
-      <div className="mt-auto rounded-2xl border border-white/[.08] bg-[#121417] p-3.5"><div className="flex items-start justify-between"><span className="eyebrow">Atlas connection</span><span className={`mt-0.5 h-2 w-2 rounded-full ${props.apiKey ? "bg-[#b9e8c1]" : "bg-[#e7d9c7]"}`} /></div><p className="mt-2 text-xs leading-5 text-white/48">{props.apiKey ? "Key available locally." : "Add your key to run a request."}</p><button onClick={props.onSettings} className="mt-3 flex items-center gap-2 text-xs font-semibold text-[#c5b8ff]"><KeyRound size={14} /> {props.apiKey ? "Manage key" : "Connect key"}<ArrowUpRight size={12} /></button></div>
+      <div className="mt-auto rounded-2xl border border-white/[.08] bg-[#121417] p-3.5"><div className="flex items-start justify-between"><span className="eyebrow">Atlas connection</span><span className={`mt-0.5 h-2 w-2 rounded-full ${connection.dot}`} /></div><p className="mt-2 text-xs font-semibold text-white/70">{connection.label}</p><p className="mt-1 text-[11px] leading-5 text-white/42">{props.connection.message || connection.detail}</p>{props.connection.balance !== undefined && <p className="mt-1 text-[11px] text-emerald-200">{props.connection.balance.toFixed(4)} {props.connection.currency || "USD"}</p>}<button onClick={props.onSettings} className="mt-3 flex items-center gap-2 text-xs font-semibold text-[#c5b8ff]"><KeyRound size={14} /> {props.connection.status === "missing" ? "Connect key" : "Manage key"}<ArrowUpRight size={12} /></button></div>
       <div className="mt-4 flex items-center justify-between px-2 text-white/30"><span className="eyebrow text-[9px]">Built for Atlas Cloud</span><Zap size={13} /></div>
     </aside>
     {props.open && <button className="fixed inset-0 z-30 bg-black/60 lg:hidden" onClick={props.onClose} aria-label="Close navigation" />}

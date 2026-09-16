@@ -16,8 +16,10 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import type { StudioArtifact, StudioMessage, StudioMode, StudioReference } from "@/lib/studioStore";
+import type { GenerationJob, StudioArtifact, StudioMessage, StudioMode, StudioReference } from "@/lib/studioStore";
 import type { AtlasModelDefinition, AtlasParameterDefinition, AtlasParameterValue } from "@shared/atlasModels";
+import GenerationActivity from "./GenerationActivity";
+import { connectionCopy, type AtlasConnection } from "@/lib/atlasConnection";
 
 type Props = {
   mode: StudioMode;
@@ -35,6 +37,9 @@ type Props = {
   prompt: string;
   busy: boolean;
   uploading: boolean;
+  uploadError?: string;
+  jobs: GenerationJob[];
+  connection: AtlasConnection;
   pendingCount?: number;
   onPrompt: (value: string) => void;
   onSubmit: () => void;
@@ -51,6 +56,7 @@ type Props = {
   onClear: () => void;
   onSidebar: () => void;
   onSettings: () => void;
+  onCheckJob: (job: GenerationJob) => void;
 };
 
 async function downloadArtifact(url: string, filename: string) {
@@ -133,6 +139,7 @@ export default function StudioWorkspace(props: Props) {
   const finalFrameReady = props.mode === "video" && props.finalFrameSupported && props.references.length === 1;
   const invalidFinalFrame = props.mode === "video" && Boolean(props.finalFrame) && props.references.length !== 1;
   const referencesOverLimit = mediaMode && props.referenceLimit > 0 && props.references.length > props.referenceLimit;
+  const connection = connectionCopy[props.connection.status];
 
   return <main className="flex min-h-screen min-w-0 flex-1 flex-col">
     <header className="flex h-[72px] items-center justify-between border-b border-white/[.08] px-5 sm:px-8 lg:px-10">
@@ -145,6 +152,9 @@ export default function StudioWorkspace(props: Props) {
         </div>
       </div>
       <div className="flex items-center gap-2">
+        <button onClick={props.onSettings} className="flex items-center gap-2 rounded-full border border-white/[.08] px-3 py-1.5 text-[11px] text-white/55" aria-label={`Atlas connection: ${connection.label}`}>
+          <span className={`h-2 w-2 rounded-full ${connection.dot}`} /><span className="hidden sm:inline">{connection.label}</span>
+        </button>
         {Boolean(props.pendingCount) &&
           <div className="hidden rounded-full border border-white/[.08] px-3 py-1.5 text-[11px] text-white/55 sm:block">
             {props.pendingCount} active
@@ -379,10 +389,15 @@ export default function StudioWorkspace(props: Props) {
               <div className="mt-2 px-1 text-[10px] text-[#e7d9c7]/70">
                 This mode supports at most {props.referenceLimit} references. Remove the extra image before generating.
               </div>}
+            {props.uploadError &&
+              <div role="alert" className="mt-2 rounded-lg border border-red-400/20 bg-red-400/[.06] px-3 py-2 text-[10px] leading-4 text-red-200/80">
+                Attachment failed: {props.uploadError}
+              </div>}
           </div>
         </div>
 
         <div className="space-y-5">
+          {mediaMode && <GenerationActivity jobs={props.jobs} onCheck={props.onCheckJob} />}
           <div className="rounded-[26px] border border-white/[.08] bg-[#0e1012] p-5">
             <div className="flex items-center justify-between">
               <div>
