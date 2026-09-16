@@ -331,6 +331,9 @@ export function updateGenerationJob(
 export function recoverableJobs(store: StudioStore) {
   return store.jobs.filter((job) => Boolean(job.requestId) && (job.status === "pending" || job.status === "processing"));
 }
+export function jobsAwaitingOutput(jobs: GenerationJob[], kind: GenerationKind) {
+  return jobs.filter((job) => job.kind === kind && ["submitting", "pending", "processing", "timed_out"].includes(job.status));
+}
 export function titleFromPrompt(prompt: string) {
   const clean = prompt.replace(/\s+/g, " ").trim();
   return clean.length > 48 ? `${clean.slice(0, 47)}…` : clean || "Untitled session";

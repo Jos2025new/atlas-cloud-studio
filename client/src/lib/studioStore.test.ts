@@ -8,6 +8,7 @@ import {
   createReference,
   createSession,
   deleteSession,
+  jobsAwaitingOutput,
   loadStudioStore,
   normalizeGenerationStatus,
   recoverableJobs,
@@ -81,6 +82,31 @@ describe("studioStore sessions", () => {
 });
 
 describe("generation recovery", () => {
+  it("keeps accepted work visible on the canvas until an output arrives", () => {
+    let store = loadStudioStore(new MemoryStorage());
+    const processing = createGenerationJob({
+      requestId: "pred_processing",
+      sessionId: store.activeSessionId,
+      kind: "image",
+      model: "bytedance/seedream-v5.0-pro/text-to-image",
+      prompt: "Waiting for an image",
+      params: {},
+      providerStatus: "processing",
+    });
+    const completed = createGenerationJob({
+      requestId: "pred_completed",
+      sessionId: store.activeSessionId,
+      kind: "image",
+      model: "bytedance/seedream-v5.0-pro/text-to-image",
+      prompt: "Already rendered",
+      params: {},
+      providerStatus: "completed",
+    });
+    store = addGenerationJob(addGenerationJob(store, processing), completed);
+
+    expect(jobsAwaitingOutput(store.jobs, "image").map((job) => job.id)).toEqual([processing.id]);
+  });
+
   it("persists provider request id, ordered references and final frame before completion", () => {
     const storage = new MemoryStorage();
     let store = loadStudioStore(storage);

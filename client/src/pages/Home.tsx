@@ -90,6 +90,7 @@ export default function Home() {
   const [keyDraft, setKeyDraft] = useState(apiKey);
   const [settings, setSettings] = useState(false);
   const [sidebar, setSidebar] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => typeof window !== "undefined" && localStorage.getItem("atlas_sidebar_collapsed") === "1");
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -493,7 +494,7 @@ export default function Home() {
         error: undefined,
       }));
       if (prompt.trim() === pending.prompt) setPrompt("");
-      toast.success(`Atlas accepted the generation · ${response.id}`);
+      toast.success(`Atlas accepted the generation · ${response.id}`, { duration: 2500 });
       void pollJob(acceptedJob);
     } catch (error) {
       const message = errorMessage(error, "Atlas rejected the generation request");
@@ -537,13 +538,21 @@ export default function Home() {
   return <div className="app-shell flex min-h-screen text-[#f4f1eb]">
     <StudioSidebar
       open={sidebar}
+      collapsed={sidebarCollapsed}
       connection={connection}
       mode={active.mode}
       activeSessionId={studio.activeSessionId}
       sessions={studio.sessions}
       onClose={() => setSidebar(false)}
+      onToggleCollapsed={() => {
+        setSidebarCollapsed((current) => {
+          const next = !current;
+          localStorage.setItem("atlas_sidebar_collapsed", next ? "1" : "0");
+          return next;
+        });
+      }}
       onNew={() => { commitStore((store) => addSession(store, createSession())); setPrompt(""); }}
-      onMode={onMode}
+      onMode={(mode) => { onMode(mode); setSidebar(false); }}
       onOpen={(id) => { commitStore((store) => activateSession(store, id)); setPrompt(""); setSidebar(false); }}
       onRename={onRename}
       onDelete={onDelete}
