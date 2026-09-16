@@ -1,6 +1,6 @@
 import { COOKIE_NAME } from "@shared/const";
 import { assertModelMode, buildAtlasRequestParams, type AtlasModelMode } from "@shared/atlasModels";
-import { resolveSingleReferenceRequest } from "@shared/atlasReferenceModels";
+import { resolveReferenceRequest } from "@shared/atlasReferenceModels";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, router } from "./_core/trpc";
@@ -13,6 +13,7 @@ const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;
 
 const apiKeySchema = z.string().trim().min(1, "An Atlas Cloud API key is required");
 const modelParamsSchema = z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).default({});
+const referenceUrlsSchema = z.array(z.string().url()).max(10).default([]);
 
 async function parseAtlasResponse(response: Response) {
   const text = await response.text();
@@ -45,15 +46,26 @@ function requestParams(model: string, mode: AtlasModelMode, params: Record<strin
     assertModelMode(model, mode);
     return buildAtlasRequestParams(model, params);
   } catch (error) {
-    throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "Invalid Atlas model parameters." });
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: error instanceof Error ? error.message : "Invalid Atlas model parameters.",
+    });
   }
 }
 
-function mediaRequest(model: string, mode: "image" | "video", referenceUrl?: string) {
+function mediaRequest(
+  model: string,
+  mode: "image" | "video",
+  referenceUrls: string[] = [],
+  finalFrameUrl?: string,
+) {
   try {
-    return resolveSingleReferenceRequest(model, mode, referenceUrl);
+    return resolveReferenceRequest(model, mode, referenceUrls, finalFrameUrl);
   } catch (error) {
-    throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "Invalid reference configuration." });
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: error instanceof Error ? error.message : "Invalid reference configuration.",
+    });
   }
 }
 
@@ -74,7 +86,7 @@ export const appRouter = router({
   auth: router({
     me: publicProcedure.query(opts => opts.ctx.user),
     logout: publicProcedure.mutation(({ ctx }) => {
-      cookieOptions = getSessionCookieOptions(ctx.req);
+      const cookieOptions = getSessionCookieOptions(ctx.req);
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
       return { success: true } as const;
     }),
@@ -129,31 +141,58 @@ export const appRouter = router({
         return { url };
       }),
     generateImage: publicProcedure
-      .input(z.object({ apiKey: apiKeySchema, model: z.string().trim().min(1), prompt: z.string().trim().min(1), params: modelParamsSchema, referenceUrl: z.string().url().optional() }))
+      .input(z.object({
+        apiKey: apiKeySchema,
+        model: z.string().trim().min(1),
+        prompt: z.string().trim().min(1),
+        params: modelParamsSchema,
+        referenceUrls: referenceUrlsSchema,
+      }))
       .mutation(async ({ input }) => {
         const params = requestParams(input.model, "image", input.params);
-        const resolved = mediaRequest(input.model, "image", input.referenceUrl);
+        const resolved = mediaRequest(input.model, "image", input.referenceUrls);
         const result = await atlasRequest(`${MEDIA_BASE}/model/generateImage`, input.apiKey, {
           method: "POST",
-          body: JSON.stringify({ model: resolved.modelId, prompt: input.prompt, ...params, ...resolved.referencePayload }),
+          body: JSON.stringify({
+            model: resolved.modelId,
+            prompt: input.prompt,
+            ...params,
+            ...resolved.referencePayload,
+          }),
         });
         return asyncTask(result, resolved.modelId);
       }),
     generateVideo: publicProcedure
-      .input(z.object({ apiKey: apiKeySchema, model: z.string().trim().min(1), prompt: z.string().trim().min(1), params: modelParamsSchema, referenceUrl: z.string().url().optional() }))
+      .input(z.object({
+        apiKey: apiKeySchema,
+        model: z.string().trim().min(1),
+        prompt: z.string().trim().min(1),
+        params: modelParamsSchema,
+        referenceUrls: referenceUrlsSchema,
+        finalFrameUrl: z.string().url().optional(),
+      }))
       .mutation(async ({ input }) => {
         const params = requestParams(input.model, "video", input.params);
-        const resolved = mediaRequest(input.model, "video", input.referenceUrl);
+        const resolved = mediaRequest(input.model, "video", input.referenceUrls, input.finalFrameUrl);
         const result = await atlasRequest(`${MEDIA_BASE}/model/generateVideo`, input.apiKey, {
           method: "POST",
-          body: JSON.stringify({ model: resolved.modelId, prompt: input.prompt, ...params, ...resolved.referencePayload }),
+          body: JSON.stringify({
+            model: resolved.modelId,
+            prompt: input.prompt,
+            ...params,
+            ...resolved.referencePayload,
+          }),
         });
         return asyncTask(result, resolved.modelId);
       }),
     prediction: publicProcedure
       .input(z.object({ apiKey: apiKeySchema, id: z.string().trim().min(1) }))
       .query(async ({ input }) => {
-        const result = await atlasRequest(`${MEDIA_BASE}/model/prediction/${encodeURIComponent(input.id)}`, input.apiKey, { method: "GET", headers: { "Content-Type": "application/json" } }) as {
+        const result = await atlasRequest(
+          `${MEDIA_BASE}/model/prediction/${encodeURIComponent(input.id)}`,
+          input.apiKey,
+          { method: "GET", headers: { "Content-Type": "application/json" } },
+        ) as {
           data?: { id?: string; status?: string; outputs?: unknown[]; error?: string | { message?: string } };
         };
         return {
