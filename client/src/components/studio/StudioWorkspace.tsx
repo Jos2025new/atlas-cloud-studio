@@ -1,12 +1,12 @@
 import { ArrowUpRight, ChevronDown, Clapperboard, Image as ImageIcon, LoaderCircle, PanelLeft, Send, Settings2, Sparkles, Trash2 } from "lucide-react";
 import type { StudioArtifact, StudioMessage, StudioMode } from "@/lib/studioStore";
-
-export type ModelOption = { id: string; label: string; note: string };
+import type { AtlasModelDefinition, AtlasParameterDefinition, AtlasParameterValue } from "@shared/atlasModels";
 
 type Props = {
   mode: StudioMode;
   model: string;
-  models: ModelOption[];
+  models: AtlasModelDefinition[];
+  params: Record<string, unknown>;
   messages: StudioMessage[];
   artifacts: StudioArtifact[];
   prompt: string;
@@ -15,13 +15,26 @@ type Props = {
   onPrompt: (value: string) => void;
   onSubmit: () => void;
   onModel: (value: string) => void;
+  onParam: (key: string, value: AtlasParameterValue) => void;
   onClear: () => void;
   onSidebar: () => void;
   onSettings: () => void;
 };
 
+function ParameterControl({ definition, value, onChange }: { definition: AtlasParameterDefinition; value: unknown; onChange: (value: AtlasParameterValue) => void }) {
+  const current = value ?? definition.defaultValue;
+  if (definition.type === "boolean") {
+    return <label className="flex items-center justify-between gap-3 rounded-xl border border-white/[.08] bg-white/[.025] px-3 py-2.5 text-xs text-white/60"><span>{definition.label}</span><input type="checkbox" checked={Boolean(current)} onChange={(event) => onChange(event.target.checked)} className="h-4 w-4 accent-[#c5b8ff]" /></label>;
+  }
+  if (definition.type === "number") {
+    return <label className="block"><span className="eyebrow">{definition.label}</span><input type="number" value={typeof current === "number" ? current : Number(definition.defaultValue)} min={definition.min} max={definition.max} step={definition.integer ? 1 : "any"} onChange={(event) => onChange(Number(event.target.value))} className="mt-2 w-full rounded-xl border border-white/[.1] bg-[#15171a] px-3 py-2.5 text-xs text-white outline-none" /></label>;
+  }
+  return <label className="block"><span className="eyebrow">{definition.label}</span><select value={String(current)} onChange={(event) => { const option = definition.options?.find((candidate) => String(candidate.value) === event.target.value); if (option) onChange(option.value); }} className="mt-2 w-full appearance-none rounded-xl border border-white/[.1] bg-[#15171a] px-3 py-2.5 text-xs text-white outline-none">{definition.options?.map((option) => <option key={String(option.value)} value={String(option.value)}>{option.label}</option>)}</select></label>;
+}
+
 export default function StudioWorkspace(props: Props) {
   const visibleArtifacts = props.artifacts.filter((artifact) => artifact.kind === props.mode);
+  const modelDefinition = props.models.find((model) => model.id === props.model) ?? props.models[0];
   return <main className="flex min-h-screen min-w-0 flex-1 flex-col">
     <header className="flex h-[72px] items-center justify-between border-b border-white/[.08] px-5 sm:px-8 lg:px-10"><div className="flex items-center gap-3"><button className="rounded-lg p-2 text-white/50 lg:hidden" onClick={props.onSidebar}><PanelLeft size={18} /></button><div className="eyebrow hidden sm:block">Workspace / {props.mode}</div><div className="flex items-center gap-2 sm:hidden"><Sparkles size={14} className="text-[#c5b8ff]" /><span className="text-sm font-semibold">Atlas Studio</span></div></div><div className="flex items-center gap-2">{Boolean(props.pendingCount) && <div className="hidden rounded-full border border-white/[.08] px-3 py-1.5 text-[11px] text-white/55 sm:block">{props.pendingCount} active</div>}<button onClick={props.onSettings} className="rounded-xl border border-white/[.1] p-2.5 text-white/55"><Settings2 size={17} /></button></div></header>
 
@@ -33,13 +46,15 @@ export default function StudioWorkspace(props: Props) {
           <div className="flex items-center justify-between border-b border-white/[.07] pb-4"><div><div className="text-sm font-bold">{props.mode === "chat" ? "Conversation" : props.mode === "image" ? "Image direction" : "Motion direction"}</div><div className="mt-1 text-xs text-white/38">{props.mode === "chat" ? "Clear context in, useful answers out." : "Describe the scene. Atlas handles the render."}</div></div><button onClick={props.onClear} className="rounded-lg p-2 text-white/30"><Trash2 size={15} /></button></div>
 
           <div className="scroll-thin flex-1 space-y-5 overflow-y-auto py-6">{props.mode === "chat" ? props.messages.map((message) => <div key={message.id} className={`flex gap-3 ${message.role === "user" ? "justify-end" : "justify-start"}`}><div className={`max-w-[86%] rounded-2xl px-4 py-3 text-sm leading-6 ${message.role === "user" ? "bg-[#e7d9c7] text-[#171512]" : "border border-white/[.08] bg-white/[.035] text-white/78"}`}>{message.content}</div></div>) : visibleArtifacts.length ? <div className="grid gap-4 sm:grid-cols-2">{visibleArtifacts.map((artifact) => <div key={artifact.id} className="overflow-hidden rounded-2xl border border-white/[.08] bg-white/[.03]"><div className="aspect-square bg-black">{artifact.kind === "image" ? <img src={artifact.url} alt={artifact.prompt} className="h-full w-full object-cover" /> : <video src={artifact.url} controls className="h-full w-full object-cover" />}</div><div className="p-3"><div className="eyebrow">{artifact.model}</div><div className="mt-1 line-clamp-2 text-xs leading-5 text-white/55">{artifact.prompt}</div></div></div>)}</div> : <div className="flex h-full min-h-[290px] flex-col items-center justify-center text-center"><div className="grid h-14 w-14 place-items-center rounded-2xl border border-white/[.1] bg-white/[.035] text-[#c5b8ff]">{props.mode === "image" ? <ImageIcon size={23} /> : <Clapperboard size={23} />}</div><div className="mt-5 text-sm font-semibold">Your {props.mode} board is empty</div></div>}
-          {props.busy && <div className="flex items-center gap-3 text-xs text-white/45"><LoaderCircle size={15} className="animate-spin text-[#c5b8ff]" /> {props.mode === "chat" ? "Thinking with Atlas…" : "Waiting for the render…"}</div>}</div>
+          {props.busy && <div className="flex items-center gap-3 text-xs text-white/45"><LoaderCircle size={15} className="animate-spin text-[#c5b8ff]" /> {props.mode === "chat" ? "Thinking with Atlas…" : "Submitting generation…"}</div>}</div>
 
-          <div className="rounded-2xl border border-white/[.1] bg-[#15171a] p-2"><textarea value={props.prompt} onChange={(e) => props.onPrompt(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); props.onSubmit(); } }} placeholder={props.mode === "chat" ? "Ask Atlas anything…" : props.mode === "image" ? "Describe an image to create…" : "Describe a moving scene…"} rows={3} className="w-full resize-none bg-transparent px-2 py-1 text-sm leading-6 text-white outline-none placeholder:text-white/25" /><div className="flex justify-end px-1 pt-2"><button disabled={!props.prompt.trim() || props.busy} onClick={props.onSubmit} className="flex items-center gap-2 rounded-xl bg-[#c5b8ff] px-3.5 py-2.5 text-xs font-bold text-[#17151f]">{props.busy ? <LoaderCircle size={14} className="animate-spin" /> : <Send size={14} />} {props.busy ? "Working" : props.mode === "chat" ? "Send" : "Generate"}</button></div></div>
+          <div className="rounded-2xl border border-white/[.1] bg-[#15171a] p-2"><textarea value={props.prompt} onChange={(event) => props.onPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); props.onSubmit(); } }} placeholder={props.mode === "chat" ? "Ask Atlas anything…" : props.mode === "image" ? "Describe an image to create…" : "Describe a moving scene…"} rows={3} className="w-full resize-none bg-transparent px-2 py-1 text-sm leading-6 text-white outline-none placeholder:text-white/25" /><div className="flex justify-end px-1 pt-2"><button disabled={!props.prompt.trim() || props.busy} onClick={props.onSubmit} className="flex items-center gap-2 rounded-xl bg-[#c5b8ff] px-3.5 py-2.5 text-xs font-bold text-[#17151f]">{props.busy ? <LoaderCircle size={14} className="animate-spin" /> : <Send size={14} />} {props.busy ? "Working" : props.mode === "chat" ? "Send" : "Generate"}</button></div></div>
         </div>
 
-        <div className="space-y-5"><div className="rounded-[26px] border border-white/[.08] bg-[#0e1012] p-5"><div className="flex items-center justify-between"><div><div className="eyebrow">Configuration</div><div className="mt-2 text-sm font-bold">{props.mode === "chat" ? "Model" : "Engine"}</div></div><ChevronDown size={15} className="text-white/35" /></div><select value={props.model} onChange={(e) => props.onModel(e.target.value)} className="mt-5 w-full appearance-none rounded-xl border border-white/[.1] bg-[#15171a] px-3.5 py-3 text-xs text-white outline-none">{props.models.map((model) => <option key={model.id} value={model.id}>{model.label} · {model.note}</option>)}</select></div>
-        <div className="rounded-[26px] border border-[#c5b8ff]/15 bg-[#c5b8ff]/[.05] p-5"><div className="text-xs font-bold">Local history</div><p className="mt-2 text-xs leading-5 text-white/45">Messages, results and configuration are restored after reload.</p><a href="https://atlascloud.ai/docs" target="_blank" rel="noreferrer" className="mt-3 inline-flex items-center gap-1.5 text-[11px] font-semibold text-[#c5b8ff]">Atlas docs <ArrowUpRight size={12} /></a></div></div>
+        <div className="space-y-5"><div className="rounded-[26px] border border-white/[.08] bg-[#0e1012] p-5"><div className="flex items-center justify-between"><div><div className="eyebrow">Configuration</div><div className="mt-2 text-sm font-bold">{props.mode === "chat" ? "Model" : "Engine"}</div></div><ChevronDown size={15} className="text-white/35" /></div><select value={props.model} onChange={(event) => props.onModel(event.target.value)} className="mt-5 w-full appearance-none rounded-xl border border-white/[.1] bg-[#15171a] px-3.5 py-3 text-xs text-white outline-none">{props.models.map((model) => <option key={model.id} value={model.id}>{model.label} · {model.note}</option>)}</select>
+          {modelDefinition && <div className="mt-5 space-y-3 border-t border-white/[.07] pt-4">{modelDefinition.parameters.map((parameter) => <ParameterControl key={parameter.key} definition={parameter} value={props.params[parameter.key]} onChange={(value) => props.onParam(parameter.key, value)} />)}</div>}
+        </div>
+        <div className="rounded-[26px] border border-[#c5b8ff]/15 bg-[#c5b8ff]/[.05] p-5"><div className="text-xs font-bold">Validated Atlas contract</div><p className="mt-2 text-xs leading-5 text-white/45">Only parameters supported by the selected model are sent and stored with the result.</p><a href="https://atlascloud.ai/docs" target="_blank" rel="noreferrer" className="mt-3 inline-flex items-center gap-1.5 text-[11px] font-semibold text-[#c5b8ff]">Atlas docs <ArrowUpRight size={12} /></a></div></div>
       </div>
     </section>
   </main>;
