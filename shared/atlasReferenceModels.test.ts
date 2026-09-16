@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { getReferenceCapabilities, resolveReferenceRequest } from "./atlasReferenceModels";
+import { getReferenceCapabilities, referenceRouteLabel, resolveReferenceRequest } from "./atlasReferenceModels";
 
 describe("advanced Atlas reference routing", () => {
+  it("names the actual route selected by the current references", () => {
+    expect(referenceRouteLabel("image", 0)).toBe("Text to image");
+    expect(referenceRouteLabel("image", 1)).toBe("Image edit");
+    expect(referenceRouteLabel("video", 0)).toBe("Text to video");
+    expect(referenceRouteLabel("video", 1)).toBe("Image to video");
+    expect(referenceRouteLabel("video", 2)).toBe("Reference to video");
+  });
+
   it("keeps text-to-image when no references are selected", () => {
     expect(resolveReferenceRequest("bytedance/seedream-v5.0-pro/text-to-image", "image")).toEqual({
       modelId: "bytedance/seedream-v5.0-pro/text-to-image",

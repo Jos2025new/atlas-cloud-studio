@@ -36,6 +36,12 @@ export function supportsReferences(modelId: string) {
   return getReferenceCapabilities(modelId).maxReferences > 0;
 }
 
+export function referenceRouteLabel(mode: Extract<AtlasModelMode, "image" | "video">, referenceCount: number) {
+  if (mode === "image") return referenceCount > 0 ? "Image edit" : "Text to image";
+  if (referenceCount === 0) return "Text to video";
+  return referenceCount === 1 ? "Image to video" : "Reference to video";
+}
+
 export function resolveReferenceRequest(
   modelId: string,
   mode: Extract<AtlasModelMode, "image" | "video">,

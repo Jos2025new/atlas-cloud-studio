@@ -4,6 +4,8 @@ import { trpc } from "@/lib/trpc";
 import StudioSidebar from "@/components/studio/StudioSidebar";
 import StudioWorkspace from "@/components/studio/StudioWorkspace";
 import SettingsModal from "@/components/studio/SettingsModal";
+import QuoteConfirmation from "@/components/studio/QuoteConfirmation";
+import type { AtlasConnection } from "@/lib/atlasConnection";
 import {
   activateSession,
   addGenerationJob,
@@ -23,6 +25,7 @@ import {
   updateGenerationJob,
   updateSession,
   type GenerationJob,
+  type GenerationQuote,
   type StudioArtifact,
   type StudioMode,
   type StudioReference,
@@ -38,6 +41,21 @@ import {
   type AtlasParameterValue,
 } from "@shared/atlasModels";
 import { getReferenceCapabilities } from "@shared/atlasReferenceModels";
+
+type PendingGeneration = {
+  sessionId: string;
+  kind: "image" | "video";
+  model: string;
+  prompt: string;
+  params: Record<string, AtlasParameterValue>;
+  references: StudioReference[];
+  finalFrame?: StudioReference;
+  quote: GenerationQuote;
+};
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
 
 function outputUrl(value: unknown) {
   if (typeof value === "string") return value;
@@ -72,10 +90,15 @@ export default function Home() {
   const [keyDraft, setKeyDraft] = useState(apiKey);
   const [settings, setSettings] = useState(false);
   const [sidebar, setSidebar] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => typeof window !== "undefined" && localStorage.getItem("atlas_sidebar_collapsed") === "1");
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string>();
+  const [pendingGeneration, setPendingGeneration] = useState<PendingGeneration>();
+  const [connection, setConnection] = useState<AtlasConnection>(() => ({ status: apiKey ? "checking" : "missing" }));
   const polling = useRef(new Set<string>());
+  const checkedKey = useRef<string | undefined>(undefined);
 
   const active = useMemo(
     () => studio.sessions.find((session) => session.id === studio.activeSessionId) ?? studio.sessions[0],
@@ -86,12 +109,39 @@ export default function Home() {
     () => getReferenceCapabilities(active.selectedModel),
     [active.selectedModel],
   );
-  const activeJobs = useMemo(() => recoverableJobs(studio), [studio]);
+  const activeJobs = useMemo(() => studio.jobs.filter((job) => job.sessionId === active.id), [active.id, studio.jobs]);
   const chatMutation = trpc.atlas.chat.useMutation();
   const imageMutation = trpc.atlas.generateImage.useMutation();
   const videoMutation = trpc.atlas.generateVideo.useMutation();
   const uploadMutation = trpc.atlas.uploadMedia.useMutation();
+  const calculateMutation = trpc.atlas.calculate.useMutation();
+  const validateKeyMutation = trpc.atlas.validateKey.useMutation();
   const utils = trpc.useUtils();
+
+  const verifyKey = useCallback(async (value: string) => {
+    if (!value) {
+      setConnection({ status: "missing" });
+      return;
+    }
+    checkedKey.current = value;
+    setConnection({ status: "checking" });
+    try {
+      const result = await validateKeyMutation.mutateAsync({ apiKey: value });
+      if (!result.valid) {
+        setConnection({ status: "invalid" });
+      } else if (!result.billingAccess) {
+        setConnection({ status: "limited" });
+      } else {
+        setConnection({ status: "connected", balance: result.balance, currency: result.currency });
+      }
+    } catch (error) {
+      setConnection({ status: "unreachable", message: errorMessage(error, "Atlas could not be reached from this server.") });
+    }
+  }, [validateKeyMutation]);
+
+  useEffect(() => {
+    if (apiKey && checkedKey.current !== apiKey) void verifyKey(apiKey);
+  }, [apiKey, verifyKey]);
 
   const commitStore = useCallback((updater: (current: StudioStore) => StudioStore) => {
     setStudio((current) => {
@@ -108,12 +158,13 @@ export default function Home() {
   );
 
   const pollJob = useCallback(async (job: GenerationJob) => {
-    if (!apiKey || polling.current.has(job.requestId)) return;
-    polling.current.add(job.requestId);
+    if (!apiKey || !job.requestId || polling.current.has(job.requestId)) return;
+    const requestId = job.requestId;
+    polling.current.add(requestId);
     const delays = [1200, 2200, 3500, 5000, 7000];
     try {
       for (let attempt = 0; attempt < 36; attempt += 1) {
-        const result = await utils.atlas.prediction.fetch({ apiKey, id: job.requestId });
+        const result = await utils.atlas.prediction.fetch({ apiKey, id: requestId });
         const status = normalizeGenerationStatus(result.status);
         if (status === "completed") {
           const url = outputUrl(result.outputs?.[0]);
@@ -164,10 +215,17 @@ export default function Home() {
           delays[Math.min(attempt, delays.length - 1)],
         ));
       }
+      commitStore((current) => updateGenerationJob(current, job.id, {
+        status: "timed_out",
+        providerStatus: "timed_out",
+        error: "Automatic status checks timed out. The Atlas request ID is preserved; use Check now to resume.",
+      }));
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Polling failed");
+      const message = errorMessage(error, "Status check failed");
+      commitStore((current) => updateGenerationJob(current, job.id, { error: message }));
+      toast.error(message);
     } finally {
-      polling.current.delete(job.requestId);
+      polling.current.delete(requestId);
     }
   }, [apiKey, commitStore, utils.atlas.prediction]);
 
@@ -177,10 +235,12 @@ export default function Home() {
   }, [apiKey, studio, pollJob]);
 
   const ensureKey = () => {
-    if (apiKey) return true;
-    setKeyDraft("");
+    if (apiKey && ["connected", "limited"].includes(connection.status)) return true;
+    setKeyDraft(apiKey);
     setSettings(true);
-    toast("Add an Atlas Cloud API key to run a request");
+    if (!apiKey) toast("Add an Atlas Cloud API key to run a request");
+    else if (connection.status === "checking") toast("Wait for the Atlas connection check to finish");
+    else toast.error("Verify the Atlas connection before sending a request");
     return false;
   };
 
@@ -190,7 +250,13 @@ export default function Home() {
     else localStorage.removeItem("atlas_api_key");
     setApiKey(value);
     setSettings(false);
-    toast.success(value ? "Atlas key saved locally" : "Atlas key removed");
+    if (value) {
+      toast.success("Atlas key saved locally; verifying connection…");
+      void verifyKey(value);
+    } else {
+      setConnection({ status: "missing" });
+      toast.success("Atlas key removed");
+    }
   };
 
   const uploadImage = async (file: File): Promise<StudioReference> => {
@@ -219,6 +285,7 @@ export default function Home() {
       return;
     }
 
+    setUploadError(undefined);
     setUploading(true);
     try {
       const uploaded: StudioReference[] = [];
@@ -229,7 +296,9 @@ export default function Home() {
       })));
       toast.success(`${uploaded.length} reference${uploaded.length === 1 ? "" : "s"} added`);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Upload failed");
+      const message = errorMessage(error, "Upload failed");
+      setUploadError(message);
+      toast.error(message);
     } finally {
       setUploading(false);
     }
@@ -246,13 +315,16 @@ export default function Home() {
       return;
     }
     const sessionId = active.id;
+    setUploadError(undefined);
     setUploading(true);
     try {
       const finalFrame = await uploadImage(file);
       commitStore((current) => updateSession(current, sessionId, (session) => ({ ...session, finalFrame })));
       toast.success("Final frame added");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Upload failed");
+      const message = errorMessage(error, "Upload failed");
+      setUploadError(message);
+      toast.error(message);
     } finally {
       setUploading(false);
     }
@@ -309,7 +381,6 @@ export default function Home() {
     const value = prompt.trim();
     if (!value || busy || !ensureKey()) return;
     setBusy(true);
-    setPrompt("");
     const shouldTitle = active.title === "Untitled session";
     try {
       const params = validateModelParams(active.selectedModel, active.params);
@@ -321,6 +392,7 @@ export default function Home() {
           title: shouldTitle ? titleFromPrompt(value) : session.title,
           messages: nextMessages,
         }));
+        setPrompt("");
         const response = await chatMutation.mutateAsync({
           apiKey,
           model: active.selectedModel,
@@ -335,36 +407,103 @@ export default function Home() {
         const kind = active.mode;
         const references = [...active.references];
         const finalFrame = kind === "video" ? active.finalFrame : undefined;
-        updateActive((session) => ({
-          ...session,
-          title: shouldTitle ? titleFromPrompt(value) : session.title,
-        }));
-        const request = {
+        const quote = await calculateMutation.mutateAsync({
           apiKey,
+          kind,
           model: active.selectedModel,
           prompt: value,
           params,
           referenceUrls: references.map((reference) => reference.url),
-        };
-        const response = kind === "image"
-          ? await imageMutation.mutateAsync(request)
-          : await videoMutation.mutateAsync({ ...request, finalFrameUrl: finalFrame?.url });
-        const job = createGenerationJob({
-          requestId: response.id,
+          finalFrameUrl: finalFrame?.url,
+        });
+        setPendingGeneration({
           sessionId: active.id,
           kind,
-          model: response.model,
+          model: active.selectedModel,
           prompt: value,
           params,
-          providerStatus: response.status,
           references,
           finalFrame,
+          quote,
         });
-        commitStore((current) => addGenerationJob(current, job));
-        void pollJob(job);
       }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Something went wrong");
+      toast.error(errorMessage(error, active.mode === "chat" ? "Chat request failed" : "Atlas could not calculate this price"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirmGeneration = async () => {
+    const pending = pendingGeneration;
+    if (!pending || busy || !apiKey) return;
+    const job = createGenerationJob({
+      sessionId: pending.sessionId,
+      kind: pending.kind,
+      model: pending.model,
+      prompt: pending.prompt,
+      params: pending.params,
+      references: pending.references,
+      finalFrame: pending.finalFrame,
+      quote: pending.quote,
+      status: "submitting",
+    });
+    commitStore((current) => {
+      let next = addGenerationJob(current, job);
+      next = updateSession(next, pending.sessionId, (session) => ({
+        ...session,
+        title: session.title === "Untitled session" ? titleFromPrompt(pending.prompt) : session.title,
+      }));
+      return next;
+    });
+    setPendingGeneration(undefined);
+    setBusy(true);
+    const request = {
+      apiKey,
+      model: pending.model,
+      prompt: pending.prompt,
+      params: pending.params,
+      referenceUrls: pending.references.map((reference) => reference.url),
+    };
+    try {
+      const response = pending.kind === "image"
+        ? await imageMutation.mutateAsync(request)
+        : await videoMutation.mutateAsync({ ...request, finalFrameUrl: pending.finalFrame?.url });
+      if (!response.accepted) {
+        commitStore((current) => updateGenerationJob(current, job.id, {
+          status: "submission_uncertain",
+          providerStatus: "submission_uncertain",
+          error: response.error,
+        }));
+        toast.warning("Atlas did not confirm the submission. Check Atlas history before trying again.");
+        return;
+      }
+      const status = normalizeGenerationStatus(response.status);
+      const acceptedJob: GenerationJob = {
+        ...job,
+        requestId: response.id,
+        model: response.model,
+        status,
+        providerStatus: response.status,
+      };
+      commitStore((current) => updateGenerationJob(current, job.id, {
+        requestId: response.id,
+        model: response.model,
+        status,
+        providerStatus: response.status,
+        error: undefined,
+      }));
+      if (prompt.trim() === pending.prompt) setPrompt("");
+      toast.success(`Atlas accepted the generation · ${response.id}`, { duration: 2500 });
+      void pollJob(acceptedJob);
+    } catch (error) {
+      const message = errorMessage(error, "Atlas rejected the generation request");
+      commitStore((current) => updateGenerationJob(current, job.id, {
+        status: "failed",
+        providerStatus: "rejected",
+        error: message,
+      }));
+      toast.error(message);
     } finally {
       setBusy(false);
     }
@@ -399,13 +538,21 @@ export default function Home() {
   return <div className="app-shell flex min-h-screen text-[#f4f1eb]">
     <StudioSidebar
       open={sidebar}
-      apiKey={apiKey}
+      collapsed={sidebarCollapsed}
+      connection={connection}
       mode={active.mode}
       activeSessionId={studio.activeSessionId}
       sessions={studio.sessions}
       onClose={() => setSidebar(false)}
+      onToggleCollapsed={() => {
+        setSidebarCollapsed((current) => {
+          const next = !current;
+          localStorage.setItem("atlas_sidebar_collapsed", next ? "1" : "0");
+          return next;
+        });
+      }}
       onNew={() => { commitStore((store) => addSession(store, createSession())); setPrompt(""); }}
-      onMode={onMode}
+      onMode={(mode) => { onMode(mode); setSidebar(false); }}
       onOpen={(id) => { commitStore((store) => activateSession(store, id)); setPrompt(""); setSidebar(false); }}
       onRename={onRename}
       onDelete={onDelete}
@@ -427,7 +574,10 @@ export default function Home() {
       prompt={prompt}
       busy={busy}
       uploading={uploading}
-      pendingCount={activeJobs.length}
+      uploadError={uploadError}
+      jobs={activeJobs}
+      connection={connection}
+      pendingCount={recoverableJobs(studio).length}
       onPrompt={setPrompt}
       onSubmit={submit}
       onModel={onModel}
@@ -449,6 +599,15 @@ export default function Home() {
       }))}
       onSidebar={() => setSidebar(true)}
       onSettings={() => { setKeyDraft(apiKey); setSettings(true); }}
+      onCheckJob={(job) => { void pollJob(job); }}
+    />
+    <QuoteConfirmation
+      open={Boolean(pendingGeneration)}
+      quote={pendingGeneration?.quote}
+      prompt={pendingGeneration?.prompt || ""}
+      model={pendingGeneration?.model || ""}
+      onCancel={() => setPendingGeneration(undefined)}
+      onConfirm={() => { void confirmGeneration(); }}
     />
     <SettingsModal
       open={settings}
@@ -456,6 +615,7 @@ export default function Home() {
       onChange={setKeyDraft}
       onClose={() => setSettings(false)}
       onSave={saveKey}
+      connection={connection}
     />
   </div>;
 }

@@ -8,7 +8,21 @@ import {
 
 export type StudioMode = AtlasModelMode;
 export type GenerationKind = "image" | "video";
-export type GenerationStatus = "pending" | "processing" | "completed" | "failed";
+export type GenerationStatus =
+  | "submitting"
+  | "submission_uncertain"
+  | "pending"
+  | "processing"
+  | "completed"
+  | "failed"
+  | "timed_out";
+export type GenerationQuote = {
+  price: number;
+  originPrice?: number;
+  discount?: number;
+  estimated: boolean;
+  estimatedTokens?: number;
+};
 export type StudioReference = {
   id: string;
   url: string;
@@ -47,7 +61,7 @@ export type StudioSession = {
 };
 export type GenerationJob = {
   id: string;
-  requestId: string;
+  requestId?: string;
   sessionId: string;
   kind: GenerationKind;
   model: string;
@@ -60,10 +74,11 @@ export type GenerationJob = {
   resultUrl?: string;
   error?: string;
   artifactId?: string;
+  quote?: GenerationQuote;
   references: StudioReference[];
   finalFrame?: StudioReference;
 };
-export type StudioStore = { version: 5; activeSessionId: string; sessions: StudioSession[]; jobs: GenerationJob[] };
+export type StudioStore = { version: 6; activeSessionId: string; sessions: StudioSession[]; jobs: GenerationJob[] };
 
 type StorageLike = Pick<Storage, "getItem" | "setItem">;
 export const STUDIO_STORAGE_KEY = "atlas_cloud_studio_state_v1";
@@ -112,27 +127,30 @@ export function normalizeGenerationStatus(status: string): GenerationStatus {
   const value = status.trim().toLowerCase();
   if (["completed", "succeeded", "success"].includes(value)) return "completed";
   if (["failed", "error", "canceled", "cancelled"].includes(value)) return "failed";
+  if (["timeout", "timed_out", "expired"].includes(value)) return "timed_out";
   if (["pending", "queued", "queue", "submitted"].includes(value)) return "pending";
   return "processing";
 }
 export function createGenerationJob(input: {
-  requestId: string;
+  requestId?: string;
   sessionId: string;
   kind: GenerationKind;
   model: string;
   prompt: string;
   params: Record<string, unknown>;
+  status?: GenerationStatus;
   providerStatus?: string;
+  quote?: GenerationQuote;
   references?: StudioReference[];
   finalFrame?: StudioReference;
 }): GenerationJob {
   const timestamp = now();
-  const providerStatus = input.providerStatus || "pending";
+  const providerStatus = input.providerStatus || input.status || "submitting";
   return {
     ...input,
     references: input.references ?? [],
     id: createId("job"),
-    status: normalizeGenerationStatus(providerStatus),
+    status: input.status ?? normalizeGenerationStatus(providerStatus),
     providerStatus,
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -140,7 +158,7 @@ export function createGenerationJob(input: {
 }
 export function createEmptyStore(): StudioStore {
   const session = createSession();
-  return { version: 5, activeSessionId: session.id, sessions: [session], jobs: [] };
+  return { version: 6, activeSessionId: session.id, sessions: [session], jobs: [] };
 }
 
 function normalizeReference(value: unknown): StudioReference | undefined {
@@ -215,14 +233,14 @@ function normalizeJob(value: unknown): GenerationJob | null {
   const job = value as Partial<GenerationJob> & { reference?: unknown };
   if (
     typeof job.id !== "string" ||
-    typeof job.requestId !== "string" ||
+    (job.requestId !== undefined && typeof job.requestId !== "string") ||
     typeof job.sessionId !== "string" ||
     !["image", "video"].includes(String(job.kind)) ||
     typeof job.model !== "string" ||
     typeof job.prompt !== "string" ||
     !job.params ||
     typeof job.params !== "object" ||
-    !["pending", "processing", "completed", "failed"].includes(String(job.status)) ||
+    !["submitting", "submission_uncertain", "pending", "processing", "completed", "failed", "timed_out"].includes(String(job.status)) ||
     typeof job.providerStatus !== "string" ||
     typeof job.createdAt !== "string" ||
     typeof job.updatedAt !== "string"
@@ -247,7 +265,7 @@ export function normalizeStore(value: unknown): StudioStore {
   const jobs = Array.isArray(candidate.jobs)
     ? candidate.jobs.map(normalizeJob).filter((job): job is GenerationJob => Boolean(job)).filter((job) => ids.has(job.sessionId))
     : [];
-  return { version: 5, activeSessionId, sessions, jobs };
+  return { version: 6, activeSessionId, sessions, jobs };
 }
 export function loadStudioStore(storage: StorageLike | null = browserStorage()): StudioStore {
   if (!storage) return createEmptyStore();
@@ -293,14 +311,14 @@ export function deleteSession(store: StudioStore, sessionId: string): StudioStor
   };
 }
 export function addGenerationJob(store: StudioStore, job: GenerationJob): StudioStore {
-  return store.jobs.some((existing) => existing.requestId === job.requestId)
+  return store.jobs.some((existing) => existing.id === job.id || (job.requestId && existing.requestId === job.requestId))
     ? store
     : { ...store, jobs: [job, ...store.jobs] };
 }
 export function updateGenerationJob(
   store: StudioStore,
   jobId: string,
-  patch: Partial<Omit<GenerationJob, "id" | "requestId" | "sessionId" | "createdAt">>,
+  patch: Partial<Omit<GenerationJob, "id" | "sessionId" | "createdAt">>,
 ): StudioStore {
   let changed = false;
   const jobs = store.jobs.map((job) => {
@@ -311,7 +329,10 @@ export function updateGenerationJob(
   return changed ? { ...store, jobs } : store;
 }
 export function recoverableJobs(store: StudioStore) {
-  return store.jobs.filter((job) => job.status === "pending" || job.status === "processing");
+  return store.jobs.filter((job) => Boolean(job.requestId) && (job.status === "pending" || job.status === "processing"));
+}
+export function jobsAwaitingOutput(jobs: GenerationJob[], kind: GenerationKind) {
+  return jobs.filter((job) => job.kind === kind && ["submitting", "pending", "processing", "timed_out"].includes(job.status));
 }
 export function titleFromPrompt(prompt: string) {
   const clean = prompt.replace(/\s+/g, " ").trim();

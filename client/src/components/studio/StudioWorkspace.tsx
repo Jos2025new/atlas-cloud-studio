@@ -16,8 +16,12 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import type { StudioArtifact, StudioMessage, StudioMode, StudioReference } from "@/lib/studioStore";
+import { jobsAwaitingOutput, type GenerationJob, type StudioArtifact, type StudioMessage, type StudioMode, type StudioReference } from "@/lib/studioStore";
 import type { AtlasModelDefinition, AtlasParameterDefinition, AtlasParameterValue } from "@shared/atlasModels";
+import { referenceRouteLabel } from "@shared/atlasReferenceModels";
+import GenerationActivity from "./GenerationActivity";
+import GenerationPlaceholder from "./GenerationPlaceholder";
+import { connectionCopy, type AtlasConnection } from "@/lib/atlasConnection";
 
 type Props = {
   mode: StudioMode;
@@ -35,6 +39,9 @@ type Props = {
   prompt: string;
   busy: boolean;
   uploading: boolean;
+  uploadError?: string;
+  jobs: GenerationJob[];
+  connection: AtlasConnection;
   pendingCount?: number;
   onPrompt: (value: string) => void;
   onSubmit: () => void;
@@ -51,6 +58,7 @@ type Props = {
   onClear: () => void;
   onSidebar: () => void;
   onSettings: () => void;
+  onCheckJob: (job: GenerationJob) => void;
 };
 
 async function downloadArtifact(url: string, filename: string) {
@@ -133,11 +141,14 @@ export default function StudioWorkspace(props: Props) {
   const finalFrameReady = props.mode === "video" && props.finalFrameSupported && props.references.length === 1;
   const invalidFinalFrame = props.mode === "video" && Boolean(props.finalFrame) && props.references.length !== 1;
   const referencesOverLimit = mediaMode && props.referenceLimit > 0 && props.references.length > props.referenceLimit;
+  const connection = connectionCopy[props.connection.status];
+  const awaitingJobs = mediaMode ? jobsAwaitingOutput(props.jobs, props.mode as "image" | "video") : [];
+  const routeLabel = mediaMode ? referenceRouteLabel(props.mode as "image" | "video", props.references.length) : undefined;
 
   return <main className="flex min-h-screen min-w-0 flex-1 flex-col">
     <header className="flex h-[72px] items-center justify-between border-b border-white/[.08] px-5 sm:px-8 lg:px-10">
       <div className="flex items-center gap-3">
-        <button className="rounded-lg p-2 text-white/50 lg:hidden" onClick={props.onSidebar}><PanelLeft size={18} /></button>
+        <button className="grid min-h-11 min-w-11 place-items-center rounded-lg text-white/50 lg:hidden" onClick={props.onSidebar} aria-label="Open navigation"><PanelLeft size={18} /></button>
         <div className="eyebrow hidden sm:block">Workspace / {props.mode}</div>
         <div className="flex items-center gap-2 sm:hidden">
           <Sparkles size={14} className="text-[#c5b8ff]" />
@@ -145,11 +156,14 @@ export default function StudioWorkspace(props: Props) {
         </div>
       </div>
       <div className="flex items-center gap-2">
+        <button onClick={props.onSettings} className="flex items-center gap-2 rounded-full border border-white/[.08] px-3 py-1.5 text-[11px] text-white/55" aria-label={`Atlas connection: ${connection.label}`}>
+          <span className={`h-2 w-2 rounded-full ${connection.dot}`} /><span className="hidden sm:inline">{connection.label}</span>
+        </button>
         {Boolean(props.pendingCount) &&
           <div className="hidden rounded-full border border-white/[.08] px-3 py-1.5 text-[11px] text-white/55 sm:block">
             {props.pendingCount} active
           </div>}
-        <button onClick={props.onSettings} className="rounded-xl border border-white/[.1] p-2.5 text-white/55">
+        <button onClick={props.onSettings} className="grid min-h-11 min-w-11 place-items-center rounded-xl border border-white/[.1] text-white/55" aria-label="Open settings">
           <Settings2 size={17} />
         </button>
       </div>
@@ -167,7 +181,7 @@ export default function StudioWorkspace(props: Props) {
       </div>
 
       <div className="mt-8 grid flex-1 gap-5 lg:grid-cols-[minmax(0,1fr)_310px]">
-        <div className="flex min-h-[520px] flex-col rounded-[26px] border border-white/[.08] bg-[#0e1012] p-4 sm:p-6">
+        <div className="flex min-h-[520px] flex-col rounded-[26px] border border-white/[.12] bg-[#111417] p-4 shadow-[0_22px_70px_rgba(0,0,0,.22)] sm:p-6">
           <div className="flex items-center justify-between border-b border-white/[.07] pb-4">
             <div>
               <div className="text-sm font-bold">{props.mode === "chat" ? "Conversation" : props.mode === "image" ? "Image direction" : "Motion direction"}</div>
@@ -179,7 +193,7 @@ export default function StudioWorkspace(props: Props) {
                     : "Describe the scene. Atlas handles the render."}
               </div>
             </div>
-            <button onClick={props.onClear} className="rounded-lg p-2 text-white/30"><Trash2 size={15} /></button>
+            <button onClick={props.onClear} className="grid min-h-11 min-w-11 place-items-center rounded-lg text-white/30 hover:bg-white/[.05] hover:text-white" aria-label={`Clear ${props.mode === "chat" ? "conversation" : `${props.mode} board`}`}><Trash2 size={15} /></button>
           </div>
 
           <div className="scroll-thin flex-1 space-y-5 overflow-y-auto py-6">
@@ -191,8 +205,9 @@ export default function StudioWorkspace(props: Props) {
                   </div>
                 </div>
               )
-              : visibleArtifacts.length
+              : awaitingJobs.length || visibleArtifacts.length
                 ? <div className="grid gap-4 sm:grid-cols-2">
+                  {awaitingJobs.map((job) => <GenerationPlaceholder key={job.id} job={job} />)}
                   {visibleArtifacts.map((artifact) =>
                     <div key={artifact.id} className="overflow-hidden rounded-2xl border border-white/[.08] bg-white/[.03]">
                       <div className="aspect-square bg-black">
@@ -379,11 +394,16 @@ export default function StudioWorkspace(props: Props) {
               <div className="mt-2 px-1 text-[10px] text-[#e7d9c7]/70">
                 This mode supports at most {props.referenceLimit} references. Remove the extra image before generating.
               </div>}
+            {props.uploadError &&
+              <div role="alert" className="mt-2 rounded-lg border border-red-400/20 bg-red-400/[.06] px-3 py-2 text-[10px] leading-4 text-red-200/80">
+                Attachment failed: {props.uploadError}
+              </div>}
           </div>
         </div>
 
         <div className="space-y-5">
-          <div className="rounded-[26px] border border-white/[.08] bg-[#0e1012] p-5">
+          {mediaMode && <GenerationActivity jobs={props.jobs} onCheck={props.onCheckJob} />}
+          <div className="rounded-[26px] border border-white/[.06] bg-[#0b0d0f] p-5">
             <div className="flex items-center justify-between">
               <div>
                 <div className="eyebrow">Configuration</div>
@@ -400,6 +420,11 @@ export default function StudioWorkspace(props: Props) {
                 <option key={model.id} value={model.id}>{model.label} · {model.note}</option>
               )}
             </select>
+            {routeLabel && <div className="mt-3 rounded-xl border border-white/[.08] bg-white/[.025] px-3 py-3">
+              <div className="eyebrow">Active route</div>
+              <div className="mt-1 text-xs font-semibold text-[#c5b8ff]">{routeLabel}</div>
+              {props.mode === "image" && <p className="mt-2 text-[10px] leading-4 text-white/45">Seedream creates images from text and edits images when references are attached. Image to video is available in Video with Seedance.</p>}
+            </div>}
             {modelDefinition &&
               <div className="mt-5 space-y-3 border-t border-white/[.07] pt-4">
                 {modelDefinition.parameters.map((parameter) =>

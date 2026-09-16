@@ -65,7 +65,7 @@ export const ATLAS_MODELS: AtlasModelDefinition[] = [
   {
     id: "bytedance/seedream-v5.0-pro/text-to-image",
     label: "Seedream 5.0 Pro",
-    note: "Text to image · production",
+    note: "Text to image / image edit",
     mode: "image",
     capabilities: { ...EMPTY_CAPABILITIES, textToImage: true },
     parameters: [
@@ -85,7 +85,7 @@ export const ATLAS_MODELS: AtlasModelDefinition[] = [
   {
     id: "bytedance/seedance-2.0-fast/text-to-video",
     label: "Seedance 2.0 Fast",
-    note: "Text to video · native audio",
+    note: "Text / image / reference to video",
     mode: "video",
     capabilities: {
       ...EMPTY_CAPABILITIES,
