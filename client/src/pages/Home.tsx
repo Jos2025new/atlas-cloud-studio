@@ -5,10 +5,10 @@ import StudioSidebar from "@/components/studio/StudioSidebar";
 import StudioWorkspace from "@/components/studio/StudioWorkspace";
 import SettingsModal from "@/components/studio/SettingsModal";
 import {
-  activateSession, addGenerationJob, addSession, createArtifact, createGenerationJob, createMessage, createSession,
+  activateSession, addGenerationJob, addSession, createArtifact, createGenerationJob, createMessage, createReference, createSession,
   deleteSession, loadStudioStore, normalizeGenerationStatus, recoverableJobs, renameSession, saveStudioStore,
   titleFromPrompt, updateGenerationJob, updateSession,
-  type GenerationJob, type StudioMode, type StudioSession, type StudioStore,
+  type GenerationJob, type StudioArtifact, type StudioMode, type StudioSession, type StudioStore,
 } from "@/lib/studioStore";
 import {
   defaultModelForMode,
@@ -18,8 +18,28 @@ import {
   validateModelParams,
   type AtlasParameterValue,
 } from "@shared/atlasModels";
+import { supportsSingleReference } from "@shared/atlasReferenceModels";
 
-function outputUrl(value: unknown) { if (typeof value === "string") return value; if (value && typeof value === "object") { const item = value as Record<string, unknown>; return typeof item.url === "string" ? item.url : typeof item.output === "string" ? item.output : null; } return null; }
+function outputUrl(value: unknown) {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object") {
+    const item = value as Record<string, unknown>;
+    return typeof item.url === "string" ? item.url : typeof item.output === "string" ? item.output : null;
+  }
+  return null;
+}
+
+async function fileToBase64(file: File) {
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("Could not read the selected image."));
+    reader.onerror = () => reject(reader.error || new Error("Could not read the selected image."));
+    reader.readAsDataURL(file);
+  });
+  const comma = dataUrl.indexOf(",");
+  if (comma < 0) throw new Error("Could not encode the selected image.");
+  return dataUrl.slice(comma + 1);
+}
 
 export default function Home() {
   const [studio, setStudio] = useState<StudioStore>(() => loadStudioStore());
@@ -29,6 +49,7 @@ export default function Home() {
   const [sidebar, setSidebar] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const polling = useRef(new Set<string>());
 
   const active = useMemo(() => studio.sessions.find((session) => session.id === studio.activeSessionId) ?? studio.sessions[0], [studio]);
@@ -37,6 +58,7 @@ export default function Home() {
   const chatMutation = trpc.atlas.chat.useMutation();
   const imageMutation = trpc.atlas.generateImage.useMutation();
   const videoMutation = trpc.atlas.generateVideo.useMutation();
+  const uploadMutation = trpc.atlas.uploadMedia.useMutation();
   const utils = trpc.useUtils();
 
   const commitStore = useCallback((updater: (current: StudioStore) => StudioStore) => {
@@ -58,7 +80,7 @@ export default function Home() {
           commitStore((current) => {
             const currentJob = current.jobs.find((item) => item.id === job.id);
             if (!currentJob || currentJob.status === "completed") return current;
-            const artifact = createArtifact({ kind: job.kind, url, prompt: job.prompt, model: job.model, params: job.params, generationJobId: job.id });
+            const artifact = createArtifact({ kind: job.kind, url, prompt: job.prompt, model: job.model, params: job.params, generationJobId: job.id, reference: job.reference });
             let next = updateSession(current, job.sessionId, (session) => session.artifacts.some((item) => item.generationJobId === job.id) ? session : { ...session, artifacts: [artifact, ...session.artifacts] });
             next = updateGenerationJob(next, job.id, { status: "completed", providerStatus: result.status, resultUrl: url, artifactId: artifact.id, error: undefined });
             return next;
@@ -73,8 +95,7 @@ export default function Home() {
         await new Promise((resolve) => window.setTimeout(resolve, delays[Math.min(attempt, delays.length - 1)]));
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Polling failed";
-      toast.error(message);
+      toast.error(error instanceof Error ? error.message : "Polling failed");
     } finally {
       polling.current.delete(job.requestId);
     }
@@ -84,6 +105,33 @@ export default function Home() {
 
   const ensureKey = () => { if (apiKey) return true; setKeyDraft(""); setSettings(true); toast("Add an Atlas Cloud API key to run a request"); return false; };
   const saveKey = () => { const value = keyDraft.trim(); if (value) localStorage.setItem("atlas_api_key", value); else localStorage.removeItem("atlas_api_key"); setApiKey(value); setSettings(false); toast.success(value ? "Atlas key saved locally" : "Atlas key removed"); };
+
+  const uploadReference = async (file: File) => {
+    if (!ensureKey()) return;
+    if (!file.type.startsWith("image/")) { toast.error("Select an image file."); return; }
+    if (file.size > 30 * 1024 * 1024) { toast.error("Atlas image uploads must be 30 MB or smaller."); return; }
+    if (!supportsSingleReference(active.selectedModel)) { toast.error("The selected model does not support a single-image reference."); return; }
+
+    setUploading(true);
+    try {
+      const base64 = await fileToBase64(file);
+      const uploaded = await uploadMutation.mutateAsync({ apiKey, fileName: file.name, mimeType: file.type || "image/png", base64 });
+      const reference = createReference({ url: uploaded.url, name: file.name, source: "upload" });
+      updateActive((session) => ({ ...session, reference }));
+      toast.success("Reference uploaded");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Upload failed");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const useArtifactAsReference = (artifact: StudioArtifact) => {
+    if (artifact.kind !== "image") return;
+    const reference = createReference({ url: artifact.url, name: artifact.prompt || "Generated image", source: "artifact", artifactId: artifact.id });
+    updateActive((session) => ({ ...session, reference }));
+    toast.success("Image set as reference");
+  };
 
   const submit = async () => {
     const value = prompt.trim(); if (!value || busy || !ensureKey()) return;
@@ -98,11 +146,12 @@ export default function Home() {
         updateActive((session) => ({ ...session, messages: [...session.messages, createMessage("assistant", response.content)] }));
       } else {
         const kind = active.mode;
+        const reference = active.reference && supportsSingleReference(active.selectedModel) ? active.reference : undefined;
         updateActive((session) => ({ ...session, title: shouldTitle ? titleFromPrompt(value) : session.title }));
         const response = kind === "image"
-          ? await imageMutation.mutateAsync({ apiKey, model: active.selectedModel, prompt: value, params })
-          : await videoMutation.mutateAsync({ apiKey, model: active.selectedModel, prompt: value, params });
-        const job = createGenerationJob({ requestId: response.id, sessionId: active.id, kind, model: active.selectedModel, prompt: value, params, providerStatus: response.status });
+          ? await imageMutation.mutateAsync({ apiKey, model: active.selectedModel, prompt: value, params, referenceUrl: reference?.url })
+          : await videoMutation.mutateAsync({ apiKey, model: active.selectedModel, prompt: value, params, referenceUrl: reference?.url });
+        const job = createGenerationJob({ requestId: response.id, sessionId: active.id, kind, model: response.model, prompt: value, params, providerStatus: response.status, reference });
         commitStore((current) => addGenerationJob(current, job));
         void pollJob(job);
       }
@@ -118,7 +167,7 @@ export default function Home() {
 
   return <div className="app-shell flex min-h-screen text-[#f4f1eb]">
     <StudioSidebar open={sidebar} apiKey={apiKey} mode={active.mode} activeSessionId={studio.activeSessionId} sessions={studio.sessions} onClose={() => setSidebar(false)} onNew={() => { commitStore((store) => addSession(store, createSession())); setPrompt(""); }} onMode={onMode} onOpen={(id) => { commitStore((store) => activateSession(store, id)); setPrompt(""); setSidebar(false); }} onRename={onRename} onDelete={onDelete} onSettings={() => { setKeyDraft(apiKey); setSettings(true); }} />
-    <StudioWorkspace mode={active.mode} model={active.selectedModel} models={models} params={active.params} messages={active.messages} artifacts={active.artifacts} prompt={prompt} busy={busy} pendingCount={activeJobs.length} onPrompt={setPrompt} onSubmit={submit} onModel={onModel} onParam={onParam} onClear={() => updateActive((session) => ({ ...session, messages: [], artifacts: [] }))} onSidebar={() => setSidebar(true)} onSettings={() => { setKeyDraft(apiKey); setSettings(true); }} />
+    <StudioWorkspace mode={active.mode} model={active.selectedModel} models={models} params={active.params} messages={active.messages} artifacts={active.artifacts} reference={active.reference} referenceSupported={supportsSingleReference(active.selectedModel)} prompt={prompt} busy={busy} uploading={uploading} pendingCount={activeJobs.length} onPrompt={setPrompt} onSubmit={submit} onModel={onModel} onParam={onParam} onUploadReference={uploadReference} onClearReference={() => updateActive((session) => ({ ...session, reference: undefined }))} onUseArtifactReference={useArtifactAsReference} onClear={() => updateActive((session) => ({ ...session, messages: [], artifacts: [], reference: undefined }))} onSidebar={() => setSidebar(true)} onSettings={() => { setKeyDraft(apiKey); setSettings(true); }} />
     <SettingsModal open={settings} value={keyDraft} onChange={setKeyDraft} onClose={() => setSettings(false)} onSave={saveKey} />
   </div>;
 }

@@ -9,13 +9,21 @@ import {
 export type StudioMode = AtlasModelMode;
 export type GenerationKind = "image" | "video";
 export type GenerationStatus = "pending" | "processing" | "completed" | "failed";
+export type StudioReference = {
+  id: string;
+  url: string;
+  name: string;
+  source: "upload" | "artifact";
+  createdAt: string;
+  artifactId?: string;
+};
 
 export type ChatRequestConfig = { model: string; params: Record<string, unknown> };
 export type StudioMessage = { id: string; role: "user" | "assistant"; content: string; createdAt: string; config?: ChatRequestConfig };
-export type StudioArtifact = { id: string; kind: GenerationKind; url: string; prompt: string; model: string; createdAt: string; params: Record<string, unknown>; generationJobId?: string };
-export type StudioSession = { id: string; title: string; createdAt: string; updatedAt: string; mode: StudioMode; selectedModel: string; params: Record<string, unknown>; messages: StudioMessage[]; artifacts: StudioArtifact[] };
-export type GenerationJob = { id: string; requestId: string; sessionId: string; kind: GenerationKind; model: string; prompt: string; params: Record<string, unknown>; status: GenerationStatus; providerStatus: string; createdAt: string; updatedAt: string; resultUrl?: string; error?: string; artifactId?: string };
-export type StudioStore = { version: 3; activeSessionId: string; sessions: StudioSession[]; jobs: GenerationJob[] };
+export type StudioArtifact = { id: string; kind: GenerationKind; url: string; prompt: string; model: string; createdAt: string; params: Record<string, unknown>; generationJobId?: string; reference?: StudioReference };
+export type StudioSession = { id: string; title: string; createdAt: string; updatedAt: string; mode: StudioMode; selectedModel: string; params: Record<string, unknown>; messages: StudioMessage[]; artifacts: StudioArtifact[]; reference?: StudioReference };
+export type GenerationJob = { id: string; requestId: string; sessionId: string; kind: GenerationKind; model: string; prompt: string; params: Record<string, unknown>; status: GenerationStatus; providerStatus: string; createdAt: string; updatedAt: string; resultUrl?: string; error?: string; artifactId?: string; reference?: StudioReference };
+export type StudioStore = { version: 4; activeSessionId: string; sessions: StudioSession[]; jobs: GenerationJob[] };
 
 type StorageLike = Pick<Storage, "getItem" | "setItem">;
 export const STUDIO_STORAGE_KEY = "atlas_cloud_studio_state_v1";
@@ -29,8 +37,9 @@ function createId(prefix: string) {
 function browserStorage(): StorageLike | null { try { return typeof window !== "undefined" ? window.localStorage : null; } catch { return null; } }
 
 export function createMessage(role: StudioMessage["role"], content: string, config?: ChatRequestConfig): StudioMessage { return { id: createId("msg"), role, content, createdAt: now(), ...(config ? { config } : {}) }; }
+export function createReference(input: Omit<StudioReference, "id" | "createdAt">): StudioReference { return { ...input, id: createId("reference"), createdAt: now() }; }
 export function createArtifact(input: Omit<StudioArtifact, "id" | "createdAt">): StudioArtifact { return { ...input, id: createId("artifact"), createdAt: now() }; }
-export function createSession(options: Partial<Pick<StudioSession, "title" | "mode" | "selectedModel" | "params">> = {}): StudioSession {
+export function createSession(options: Partial<Pick<StudioSession, "title" | "mode" | "selectedModel" | "params" | "reference">> = {}): StudioSession {
   const timestamp = now();
   const mode = options.mode ?? "chat";
   const requestedModel = options.selectedModel ? getAtlasModel(options.selectedModel) : undefined;
@@ -39,7 +48,7 @@ export function createSession(options: Partial<Pick<StudioSession, "title" | "mo
   if (options.params) {
     try { params = validateModelParams(model.id, { ...params, ...options.params }); } catch {}
   }
-  return { id: createId("session"), title: options.title?.trim() || "Untitled session", createdAt: timestamp, updatedAt: timestamp, mode, selectedModel: model.id, params, messages: [createMessage("assistant", DEFAULT_WELCOME)], artifacts: [] };
+  return { id: createId("session"), title: options.title?.trim() || "Untitled session", createdAt: timestamp, updatedAt: timestamp, mode, selectedModel: model.id, params, messages: [createMessage("assistant", DEFAULT_WELCOME)], artifacts: [], ...(options.reference ? { reference: options.reference } : {}) };
 }
 export function normalizeGenerationStatus(status: string): GenerationStatus {
   const value = status.trim().toLowerCase();
@@ -48,12 +57,24 @@ export function normalizeGenerationStatus(status: string): GenerationStatus {
   if (["pending", "queued", "queue", "submitted"].includes(value)) return "pending";
   return "processing";
 }
-export function createGenerationJob(input: { requestId: string; sessionId: string; kind: GenerationKind; model: string; prompt: string; params: Record<string, unknown>; providerStatus?: string }): GenerationJob {
+export function createGenerationJob(input: { requestId: string; sessionId: string; kind: GenerationKind; model: string; prompt: string; params: Record<string, unknown>; providerStatus?: string; reference?: StudioReference }): GenerationJob {
   const timestamp = now(); const providerStatus = input.providerStatus || "pending";
   return { ...input, id: createId("job"), status: normalizeGenerationStatus(providerStatus), providerStatus, createdAt: timestamp, updatedAt: timestamp };
 }
-export function createEmptyStore(): StudioStore { const session = createSession(); return { version: 3, activeSessionId: session.id, sessions: [session], jobs: [] }; }
+export function createEmptyStore(): StudioStore { const session = createSession(); return { version: 4, activeSessionId: session.id, sessions: [session], jobs: [] }; }
 
+function normalizeReference(value: unknown): StudioReference | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const reference = value as Partial<StudioReference>;
+  if (typeof reference.id !== "string" || typeof reference.url !== "string" || typeof reference.name !== "string" || !["upload", "artifact"].includes(String(reference.source)) || typeof reference.createdAt !== "string") return undefined;
+  return reference as StudioReference;
+}
+function normalizeArtifact(value: unknown): StudioArtifact | null {
+  if (!value || typeof value !== "object") return null;
+  const artifact = value as Partial<StudioArtifact>;
+  if (typeof artifact.id !== "string" || !["image", "video"].includes(String(artifact.kind)) || typeof artifact.url !== "string" || typeof artifact.prompt !== "string" || typeof artifact.model !== "string" || typeof artifact.createdAt !== "string" || !artifact.params || typeof artifact.params !== "object") return null;
+  return { ...artifact, reference: normalizeReference(artifact.reference) } as StudioArtifact;
+}
 function normalizeSession(value: unknown): StudioSession | null {
   if (!value || typeof value !== "object") return null;
   const session = value as Partial<StudioSession>;
@@ -65,7 +86,8 @@ function normalizeSession(value: unknown): StudioSession | null {
   if (session.params && typeof session.params === "object" && !Array.isArray(session.params)) {
     try { params = validateModelParams(model.id, { ...params, ...session.params }); } catch {}
   }
-  return { ...session, mode, selectedModel: model.id, params, messages: session.messages as StudioMessage[], artifacts: session.artifacts as StudioArtifact[] } as StudioSession;
+  const artifacts = session.artifacts.map(normalizeArtifact).filter((artifact): artifact is StudioArtifact => Boolean(artifact));
+  return { ...session, mode, selectedModel: model.id, params, messages: session.messages as StudioMessage[], artifacts, reference: normalizeReference(session.reference) } as StudioSession;
 }
 function isJob(value: unknown): value is GenerationJob {
   if (!value || typeof value !== "object") return false; const j = value as Partial<GenerationJob>;
@@ -78,8 +100,8 @@ export function normalizeStore(value: unknown): StudioStore {
   if (!sessions.length) return createEmptyStore();
   const activeSessionId = sessions.some((session) => session.id === candidate.activeSessionId) ? String(candidate.activeSessionId) : sessions[0].id;
   const ids = new Set(sessions.map((session) => session.id));
-  const jobs = Array.isArray(candidate.jobs) ? candidate.jobs.filter(isJob).filter((job) => ids.has(job.sessionId)) : [];
-  return { version: 3, activeSessionId, sessions, jobs };
+  const jobs = Array.isArray(candidate.jobs) ? candidate.jobs.filter(isJob).filter((job) => ids.has(job.sessionId)).map((job) => ({ ...job, reference: normalizeReference(job.reference) })) : [];
+  return { version: 4, activeSessionId, sessions, jobs };
 }
 export function loadStudioStore(storage: StorageLike | null = browserStorage()): StudioStore { if (!storage) return createEmptyStore(); try { const raw = storage.getItem(STUDIO_STORAGE_KEY); return raw ? normalizeStore(JSON.parse(raw)) : createEmptyStore(); } catch { return createEmptyStore(); } }
 export function saveStudioStore(store: StudioStore, storage: StorageLike | null = browserStorage()) { if (!storage) return; try { storage.setItem(STUDIO_STORAGE_KEY, JSON.stringify(store)); } catch {} }

@@ -1,5 +1,6 @@
 import { COOKIE_NAME } from "@shared/const";
 import { assertModelMode, buildAtlasRequestParams, type AtlasModelMode } from "@shared/atlasModels";
+import { resolveSingleReferenceRequest } from "@shared/atlasReferenceModels";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, router } from "./_core/trpc";
@@ -8,20 +9,12 @@ import { z } from "zod";
 
 const CHAT_BASE = "https://api.atlascloud.ai/v1";
 const MEDIA_BASE = "https://api.atlascloud.ai/api/v1";
+const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;
 
 const apiKeySchema = z.string().trim().min(1, "An Atlas Cloud API key is required");
 const modelParamsSchema = z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).default({});
 
-async function atlasRequest(url: string, apiKey: string, init: RequestInit = {}) {
-  const response = await fetch(url, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      ...(init.headers ?? {}),
-    },
-  });
-
+async function parseAtlasResponse(response: Response) {
   const text = await response.text();
   let payload: unknown = null;
   try { payload = text ? JSON.parse(text) : null; } catch { payload = { message: text }; }
@@ -35,6 +28,18 @@ async function atlasRequest(url: string, apiKey: string, init: RequestInit = {})
   return payload;
 }
 
+async function atlasRequest(url: string, apiKey: string, init: RequestInit = {}) {
+  const response = await fetch(url, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      ...(init.headers ?? {}),
+    },
+  });
+  return parseAtlasResponse(response);
+}
+
 function requestParams(model: string, mode: AtlasModelMode, params: Record<string, unknown>) {
   try {
     assertModelMode(model, mode);
@@ -44,11 +49,19 @@ function requestParams(model: string, mode: AtlasModelMode, params: Record<strin
   }
 }
 
-function asyncTask(result: unknown) {
-  const payload = result as { data?: { id?: string; status?: string } };
-  const id = payload.data?.id;
+function mediaRequest(model: string, mode: "image" | "video", referenceUrl?: string) {
+  try {
+    return resolveSingleReferenceRequest(model, mode, referenceUrl);
+  } catch (error) {
+    throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "Invalid reference configuration." });
+  }
+}
+
+function asyncTask(result: unknown, model: string) {
+  const payload = result as { data?: { id?: string; status?: string }; id?: string; status?: string };
+  const id = payload.data?.id || payload.id;
   if (!id) throw new TRPCError({ code: "BAD_REQUEST", message: "Atlas Cloud did not return a prediction ID." });
-  return { id, status: payload.data?.status || "queued" };
+  return { id, status: payload.data?.status || payload.status || "queued", model };
 }
 
 const messageSchema = z.object({
@@ -61,7 +74,7 @@ export const appRouter = router({
   auth: router({
     me: publicProcedure.query(opts => opts.ctx.user),
     logout: publicProcedure.mutation(({ ctx }) => {
-      const cookieOptions = getSessionCookieOptions(ctx.req);
+      cookieOptions = getSessionCookieOptions(ctx.req);
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
       return { success: true } as const;
     }),
@@ -91,19 +104,51 @@ export const appRouter = router({
           model: result.model || input.model,
         };
       }),
+    uploadMedia: publicProcedure
+      .input(z.object({
+        apiKey: apiKeySchema,
+        fileName: z.string().trim().min(1).max(240),
+        mimeType: z.string().trim().regex(/^image\//, "Only image uploads are supported in this workflow."),
+        base64: z.string().min(1),
+      }))
+      .mutation(async ({ input }) => {
+        const bytes = Buffer.from(input.base64, "base64");
+        if (!bytes.length) throw new TRPCError({ code: "BAD_REQUEST", message: "The uploaded image is empty." });
+        if (bytes.length > MAX_UPLOAD_BYTES) throw new TRPCError({ code: "BAD_REQUEST", message: "Atlas image uploads must be 30 MB or smaller." });
+
+        const formData = new FormData();
+        formData.append("file", new Blob([new Uint8Array(bytes)], { type: input.mimeType }), input.fileName);
+        const response = await fetch(`${MEDIA_BASE}/model/uploadMedia`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${input.apiKey}` },
+          body: formData,
+        });
+        const result = await parseAtlasResponse(response) as { url?: string; data?: { url?: string } };
+        const url = result.url || result.data?.url;
+        if (!url) throw new TRPCError({ code: "BAD_REQUEST", message: "Atlas Cloud did not return an upload URL." });
+        return { url };
+      }),
     generateImage: publicProcedure
-      .input(z.object({ apiKey: apiKeySchema, model: z.string().trim().min(1), prompt: z.string().trim().min(3), params: modelParamsSchema }))
+      .input(z.object({ apiKey: apiKeySchema, model: z.string().trim().min(1), prompt: z.string().trim().min(1), params: modelParamsSchema, referenceUrl: z.string().url().optional() }))
       .mutation(async ({ input }) => {
         const params = requestParams(input.model, "image", input.params);
-        const result = await atlasRequest(`${MEDIA_BASE}/model/generateImage`, input.apiKey, { method: "POST", body: JSON.stringify({ model: input.model, prompt: input.prompt, ...params }) });
-        return asyncTask(result);
+        const resolved = mediaRequest(input.model, "image", input.referenceUrl);
+        const result = await atlasRequest(`${MEDIA_BASE}/model/generateImage`, input.apiKey, {
+          method: "POST",
+          body: JSON.stringify({ model: resolved.modelId, prompt: input.prompt, ...params, ...resolved.referencePayload }),
+        });
+        return asyncTask(result, resolved.modelId);
       }),
     generateVideo: publicProcedure
-      .input(z.object({ apiKey: apiKeySchema, model: z.string().trim().min(1), prompt: z.string().trim().min(3), params: modelParamsSchema }))
+      .input(z.object({ apiKey: apiKeySchema, model: z.string().trim().min(1), prompt: z.string().trim().min(1), params: modelParamsSchema, referenceUrl: z.string().url().optional() }))
       .mutation(async ({ input }) => {
         const params = requestParams(input.model, "video", input.params);
-        const result = await atlasRequest(`${MEDIA_BASE}/model/generateVideo`, input.apiKey, { method: "POST", body: JSON.stringify({ model: input.model, prompt: input.prompt, ...params }) });
-        return asyncTask(result);
+        const resolved = mediaRequest(input.model, "video", input.referenceUrl);
+        const result = await atlasRequest(`${MEDIA_BASE}/model/generateVideo`, input.apiKey, {
+          method: "POST",
+          body: JSON.stringify({ model: resolved.modelId, prompt: input.prompt, ...params, ...resolved.referencePayload }),
+        });
+        return asyncTask(result, resolved.modelId);
       }),
     prediction: publicProcedure
       .input(z.object({ apiKey: apiKeySchema, id: z.string().trim().min(1) }))
